@@ -23,13 +23,12 @@ telegram_app = (
 
 TELEGRAM_MAX_LENGTH = 4000
 
-FREE_MESSAGE_LIMIT = 4
-STARS_PACK_PRICE = 500          # цена пакета в Stars — подберите под себя
-REQUESTS_PER_PACK = 20         # сколько запросов даёт один пакет
+FREE_MESSAGE_LIMIT = 5          # 5 бесплатных запросов
+STARS_PACK_PRICE = 500          # Цена пакета: 500 Stars
+REQUESTS_PER_PACK = 20          # Количество запросов в пакете
 PACK_PAYLOAD = "requests_pack_20"
 
-# Всё в оперативной памяти — при перезапуске Railway обнулится.
-# Для боевого режима с реальными деньгами стоит перенести в Redis как можно скорее.
+# Хранение лимитов в оперативной памяти
 USER_FREE_USED = {}
 USER_PAID_BALANCE = {}
 
@@ -57,30 +56,36 @@ async def send_long_message(message, text: str):
 async def send_pack_invoice(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_invoice(
         chat_id=chat_id,
-        title=f"{REQUESTS_PER_PACK} запросов к ИИ-ассистенту",
+        title=f"{REQUESTS_PER_PACK} AI Assistant Queries",
         description=(
-            f"Пакет из {REQUESTS_PER_PACK} дополнительных запросов "
-            "к ИИ-ассистенту по психосоматике."
+            f"Pack of {REQUESTS_PER_PACK} additional queries for "
+            "the AI Psychosomatics & Therapy Assistant."
         ),
         payload=PACK_PAYLOAD,
-        provider_token="",  # пусто — обязательно для Stars
+        provider_token="",  # Пустое поле обязательного провайдера для Telegram Stars
         currency="XTR",
-        prices=[LabeledPrice(label=f"{REQUESTS_PER_PACK} запросов", amount=STARS_PACK_PRICE)]
+        prices=[LabeledPrice(label=f"{REQUESTS_PER_PACK} queries", amount=STARS_PACK_PRICE)]
     )
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Привет! Я твой ИИ-ассистент по психосоматике.\n\n"
-        f"Первые {FREE_MESSAGE_LIMIT} вопросов — бесплатно. "
-        f"Дальше — пакеты по {REQUESTS_PER_PACK} запросов за {STARS_PACK_PRICE} ⭐️.\n\n"
-        "Просто напиши, что тебя беспокоит."
+    welcome_text = (
+        "Hi there! 👋\n\n"
+        "I help decode what your body (or your child's body) is trying to tell you "
+        "through physical symptoms, diseases, and emotional triggers.\n\n"
+        "💡 **Not sure how to start? Just send a message like:**\n"
+        '• *"My 5-year-old child has constant eczema on their hands."*\n'
+        '• *"I\'ve had lower back pain for 2 months, no injury."*\n'
+        '• *"I feel total apathy and constant fatigue, even though my medical tests are normal."*\n\n'
+        f"🎁 **You have {FREE_MESSAGE_LIMIT} FREE questions to start!**\n"
+        f"*(Packages: {REQUESTS_PER_PACK} queries for {STARS_PACK_PRICE} ⭐️)*\n\n"
+        "Describe your symptom or state below to begin:"
     )
+    await update.message.reply_text(welcome_text, parse_mode="Markdown")
 
 
 async def precheckout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.pre_checkout_query
-    # Цифровой товар, ограничений по наличию нет — подтверждаем всегда
     await query.answer(ok=True)
 
 
@@ -93,8 +98,8 @@ async def successful_payment_callback(update: Update, context: ContextTypes.DEFA
         USER_PAID_BALANCE[user_id_str] = USER_PAID_BALANCE.get(user_id_str, 0) + REQUESTS_PER_PACK
         logger.info(f"User {user_id_str} bought a pack. New balance: {USER_PAID_BALANCE[user_id_str]}")
         await update.message.reply_text(
-            f"Оплата получена! Начислено {REQUESTS_PER_PACK} запросов. "
-            "Можешь продолжать 🙌"
+            f"Payment received! You’ve been credited with {REQUESTS_PER_PACK} queries. "
+            "Feel free to continue 🙌"
         )
 
 
@@ -112,8 +117,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         USER_PAID_BALANCE[user_id_str] = paid_balance - 1
     else:
         await update.message.reply_text(
-            "Бесплатные и оплаченные запросы закончились. "
-            "Вот пакет, чтобы продолжить:"
+            "You have run out of free and paid queries. "
+            "Get a new pack to continue:"
         )
         await send_pack_invoice(update.effective_chat.id, context)
         return
