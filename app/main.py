@@ -24,7 +24,7 @@ telegram_app = (
 TELEGRAM_MAX_LENGTH = 4000
 
 FREE_MESSAGE_LIMIT = 4
-STARS_PACK_PRICE = 50          # цена пакета в Stars — подберите под себя
+STARS_PACK_PRICE = 500          # цена пакета в Stars — подберите под себя
 REQUESTS_PER_PACK = 20         # сколько запросов даёт один пакет
 PACK_PAYLOAD = "requests_pack_20"
 
