@@ -11,6 +11,12 @@ from telegram.ext import (
 from app.config import BOT_TOKEN
 from app.coze_service import ask_coze
 from app.logger import logger
+from locales import (
+    MESSAGES,
+    FREE_MESSAGE_LIMIT,
+    STARS_PACK_PRICE,
+    REQUESTS_PER_PACK
+)
 
 app = FastAPI()
 
@@ -22,15 +28,62 @@ telegram_app = (
 )
 
 TELEGRAM_MAX_LENGTH = 4000
-
-FREE_MESSAGE_LIMIT = 5          # 5 бесплатных запросов
-STARS_PACK_PRICE = 500          # Цена пакета: 500 Stars
-REQUESTS_PER_PACK = 20          # Количество запросов в пакете
 PACK_PAYLOAD = "requests_pack_20"
 
-# Хранение лимитов в оперативной памяти
 USER_FREE_USED = {}
 USER_PAID_BALANCE = {}
+
+# Кэш для автоматических переводов на редкие языки мира
+DYNAMIC_TRANSLATIONS_CACHE = {}
+
+
+def get_user_lang_code(update: Update) -> str:
+    """Извлекает 2-буквенный код языка из интерфейса пользователя (например, 'kk', 'ja', 'es')."""
+    user = update.effective_user
+    if user and user.language_code:
+        return user.language_code.split("-")[0].lower()
+    return "en"
+
+
+def get_messages_for_user(update: Update) -> dict:
+    """
+    1. Ищет язык в заранее подготовленном словаре MESSAGES (14 языков).
+    2. Если нет — ищет в кэше DYNAMIC_TRANSLATIONS_CACHE.
+    3. Если заходит редкий язык — на лету переводит через ИИ и закэширует.
+    """
+    lang = get_user_lang_code(update)
+
+    # 1. Готовые популярные языки (мгновенный ответ)
+    if lang in MESSAGES:
+        return MESSAGES[lang]
+
+    # 2. Ужe переводившиеся редкие языки (из кэша)
+    if lang in DYNAMIC_TRANSLATIONS_CACHE:
+        return DYNAMIC_TRANSLATIONS_CACHE[lang]
+
+    # 3. Редкий язык — автоперевод ИИ в реальном времени
+    try:
+        user_id = update.effective_user.id
+        prompt = (
+            f"Translate the following Telegram bot welcome message precisely into the language code '{lang}'. "
+            f"Keep emojis, formatting, and structural list.\n\n"
+            f"Message:\n{MESSAGES['en']['welcome']}"
+        )
+        translated_welcome = ask_coze(user_id=user_id, message=prompt)
+
+        translated_dict = {
+            "welcome": translated_welcome,
+            "limit_reached": MESSAGES["en"]["limit_reached"],
+            "invoice_title": MESSAGES["en"]["invoice_title"],
+            "invoice_desc": MESSAGES["en"]["invoice_desc"],
+            "invoice_label": MESSAGES["en"]["invoice_label"],
+            "payment_success": MESSAGES["en"]["payment_success"]
+        }
+        DYNAMIC_TRANSLATIONS_CACHE[lang] = translated_dict
+        return translated_dict
+    except Exception as e:
+        logger.error(f"Error during dynamic translation for lang {lang}: {e}")
+        return MESSAGES["en"]
 
 
 async def send_long_message(message, text: str):
@@ -53,35 +106,21 @@ async def send_long_message(message, text: str):
         await message.reply_text(chunk)
 
 
-async def send_pack_invoice(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+async def send_pack_invoice(chat_id: int, context: ContextTypes.DEFAULT_TYPE, texts: dict):
     await context.bot.send_invoice(
         chat_id=chat_id,
-        title=f"{REQUESTS_PER_PACK} AI Assistant Queries",
-        description=(
-            f"Pack of {REQUESTS_PER_PACK} additional queries for "
-            "the AI Psychosomatics & Therapy Assistant."
-        ),
+        title=texts["invoice_title"],
+        description=texts["invoice_desc"],
         payload=PACK_PAYLOAD,
-        provider_token="",  # Пустое поле обязательного провайдера для Telegram Stars
+        provider_token="",  # Для Telegram Stars
         currency="XTR",
-        prices=[LabeledPrice(label=f"{REQUESTS_PER_PACK} queries", amount=STARS_PACK_PRICE)]
+        prices=[LabeledPrice(label=texts["invoice_label"], amount=STARS_PACK_PRICE)]
     )
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    welcome_text = (
-        "Hi there! 👋\n\n"
-        "I help decode what your body (or your child's body) is trying to tell you "
-        "through physical symptoms, diseases, and emotional triggers.\n\n"
-        "💡 **Not sure how to start? Just send a message like:**\n"
-        '• *"My 5-year-old child has constant eczema on their hands."*\n'
-        '• *"I\'ve had lower back pain for 2 months, no injury."*\n'
-        '• *"I feel total apathy and constant fatigue, even though my medical tests are normal."*\n\n'
-        f"🎁 **You have {FREE_MESSAGE_LIMIT} FREE questions to start!**\n"
-        f"*(Packages: {REQUESTS_PER_PACK} queries for {STARS_PACK_PRICE} ⭐️)*\n\n"
-        "Describe your symptom or state below to begin:"
-    )
-    await update.message.reply_text(welcome_text, parse_mode="Markdown")
+    texts = get_messages_for_user(update)
+    await update.message.reply_text(texts["welcome"], parse_mode="Markdown")
 
 
 async def precheckout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -93,20 +132,19 @@ async def successful_payment_callback(update: Update, context: ContextTypes.DEFA
     user = update.effective_user
     user_id_str = str(user.id)
     payment = update.message.successful_payment
+    texts = get_messages_for_user(update)
 
     if payment.invoice_payload == PACK_PAYLOAD:
         USER_PAID_BALANCE[user_id_str] = USER_PAID_BALANCE.get(user_id_str, 0) + REQUESTS_PER_PACK
         logger.info(f"User {user_id_str} bought a pack. New balance: {USER_PAID_BALANCE[user_id_str]}")
-        await update.message.reply_text(
-            f"Payment received! You’ve been credited with {REQUESTS_PER_PACK} queries. "
-            "Feel free to continue 🙌"
-        )
+        await update.message.reply_text(texts["payment_success"])
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     text = update.message.text
     user_id_str = str(user.id)
+    texts = get_messages_for_user(update)
 
     free_used = USER_FREE_USED.get(user_id_str, 0)
     paid_balance = USER_PAID_BALANCE.get(user_id_str, 0)
@@ -116,14 +154,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif paid_balance > 0:
         USER_PAID_BALANCE[user_id_str] = paid_balance - 1
     else:
-        await update.message.reply_text(
-            "You have run out of free and paid queries. "
-            "Get a new pack to continue:"
-        )
-        await send_pack_invoice(update.effective_chat.id, context)
+        await update.message.reply_text(texts["limit_reached"])
+        await send_pack_invoice(update.effective_chat.id, context, texts)
         return
 
-    logger.info(f"User {user.id}: {text}")
+    logger.info(f"User {user.id} [{get_user_lang_code(update)}]: {text}")
     answer = ask_coze(user_id=user.id, message=text)
     await send_long_message(update.message, answer)
 
@@ -139,7 +174,7 @@ async def startup():
     await telegram_app.initialize()
     await telegram_app.start()
     await telegram_app.updater.start_polling(drop_pending_updates=True)
-    logger.info("Standalone AI bot started")
+    logger.info("Standalone AI bot started with multi-language support")
 
 
 @app.on_event("shutdown")
