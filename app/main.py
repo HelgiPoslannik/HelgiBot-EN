@@ -11,7 +11,7 @@ from telegram.ext import (
 from app.config import BOT_TOKEN
 from app.coze_service import ask_coze
 from app.logger import logger
-from locales import (
+from app.locales import (
     MESSAGES,
     FREE_MESSAGE_LIMIT,
     STARS_PACK_PRICE,
