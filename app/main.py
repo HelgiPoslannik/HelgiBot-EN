@@ -1,14 +1,14 @@
 from fastapi import FastAPI, Request
-from telegram import Update
+from telegram import Update, LabeledPrice
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
+    PreCheckoutQueryHandler,
     ContextTypes,
     filters
 )
 from app.config import BOT_TOKEN
-from app.subscription import check_subscription
 from app.coze_service import ask_coze
 from app.logger import logger
 
@@ -21,40 +21,23 @@ telegram_app = (
     .build()
 )
 
-TELEGRAM_MAX_LENGTH = 4000  # с небольшим запасом от лимита Telegram в 4096
+TELEGRAM_MAX_LENGTH = 4000
 
-FREE_MESSAGE_LIMIT = 5
-# Счётчик бесплатных сообщений в оперативной памяти (user_id -> количество использованных).
-# При перезапуске сервера на Railway счётчик обнулится — как и память диалогов.
-USER_FREE_MESSAGES = {}
+FREE_MESSAGE_LIMIT = 4
+STARS_PACK_PRICE = 50          # цена пакета в Stars — подберите под себя
+REQUESTS_PER_PACK = 20         # сколько запросов даёт один пакет
+PACK_PAYLOAD = "requests_pack_20"
 
-SUBSCRIBE_MESSAGE = """🛑 Твои 5 бесплатных запросов закончились — и, похоже, тебе есть что разбирать дальше 😊
-
-Это хороший знак: значит, ассистент тебе действительно откликается. Не останавливайся на этом — впереди намного больше.
-
-С подпиской в закрытом клубе открывается:
-🤖 Безлимитный доступ к ИИ-ассистенту — разбирай сколько угодно вопросов, когда угодно
-🧠 Обучение эмоциональному интеллекту и психосоматике
-🎥 Закрытые эфиры с разборами
-🩺 Полная база по 300+ диагнозам и их психологическим причинам, включая таблицу «эмоции → гормоны → тело»
-
-Условия:
-— Первый месяц — 9€ (попробовать без риска)
-— Далее — 11€/мес
-— Год сразу — 120€ (дешевле одной консультации психолога, а доступ у тебя 24/7)
-
-👉 [Оформить подписку](https://t.me/tribute/app?startapp=s11Qp)"""
+# Всё в оперативной памяти — при перезапуске Railway обнулится.
+# Для боевого режима с реальными деньгами стоит перенести в Redis как можно скорее.
+USER_FREE_USED = {}
+USER_PAID_BALANCE = {}
 
 
 async def send_long_message(message, text: str):
-    """
-    Отправляет длинный текст, разбивая его на несколько сообщений,
-    если он превышает лимит Telegram на длину одного сообщения.
-    """
     if len(text) <= TELEGRAM_MAX_LENGTH:
         await message.reply_text(text)
         return
-
     chunks = []
     current = ""
     for paragraph in text.split("\n"):
@@ -67,23 +50,51 @@ async def send_long_message(message, text: str):
             current = candidate
     if current:
         chunks.append(current)
-
     for chunk in chunks:
         await message.reply_text(chunk)
 
 
+async def send_pack_invoice(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    await context.bot.send_invoice(
+        chat_id=chat_id,
+        title=f"{REQUESTS_PER_PACK} запросов к ИИ-ассистенту",
+        description=(
+            f"Пакет из {REQUESTS_PER_PACK} дополнительных запросов "
+            "к ИИ-ассистенту по психосоматике."
+        ),
+        payload=PACK_PAYLOAD,
+        provider_token="",  # пусто — обязательно для Stars
+        currency="XTR",
+        prices=[LabeledPrice(label=f"{REQUESTS_PER_PACK} запросов", amount=STARS_PACK_PRICE)]
+    )
+
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Привет! Я твой ИИ-ассистент по психосоматике.\n\n"
+        f"Первые {FREE_MESSAGE_LIMIT} вопросов — бесплатно. "
+        f"Дальше — пакеты по {REQUESTS_PER_PACK} запросов за {STARS_PACK_PRICE} ⭐️.\n\n"
+        "Просто напиши, что тебя беспокоит."
+    )
+
+
+async def precheckout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.pre_checkout_query
+    # Цифровой товар, ограничений по наличию нет — подтверждаем всегда
+    await query.answer(ok=True)
+
+
+async def successful_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if await check_subscription(user.id):
+    user_id_str = str(user.id)
+    payment = update.message.successful_payment
+
+    if payment.invoice_payload == PACK_PAYLOAD:
+        USER_PAID_BALANCE[user_id_str] = USER_PAID_BALANCE.get(user_id_str, 0) + REQUESTS_PER_PACK
+        logger.info(f"User {user_id_str} bought a pack. New balance: {USER_PAID_BALANCE[user_id_str]}")
         await update.message.reply_text(
-            "✅ Доступ подтверждён.\n"
-            "Задавай свой вопрос."
-        )
-    else:
-        await update.message.reply_text(
-            "Привет! Я твой ИИ-ассистент по психосоматике.\n\n"
-            f"У тебя есть {FREE_MESSAGE_LIMIT} бесплатных вопросов — можешь сразу "
-            "написать, что тебя беспокоит."
+            f"Оплата получена! Начислено {REQUESTS_PER_PACK} запросов. "
+            "Можешь продолжать 🙌"
         )
 
 
@@ -92,52 +103,38 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     user_id_str = str(user.id)
 
-    is_subscribed = await check_subscription(user.id)
+    free_used = USER_FREE_USED.get(user_id_str, 0)
+    paid_balance = USER_PAID_BALANCE.get(user_id_str, 0)
 
-    if not is_subscribed:
-        used = USER_FREE_MESSAGES.get(user_id_str, 0)
-        if used >= FREE_MESSAGE_LIMIT:
-            await update.message.reply_text(
-                SUBSCRIBE_MESSAGE,
-                parse_mode="Markdown"
-            )
-            return
-        USER_FREE_MESSAGES[user_id_str] = used + 1
+    if free_used < FREE_MESSAGE_LIMIT:
+        USER_FREE_USED[user_id_str] = free_used + 1
+    elif paid_balance > 0:
+        USER_PAID_BALANCE[user_id_str] = paid_balance - 1
+    else:
+        await update.message.reply_text(
+            "Бесплатные и оплаченные запросы закончились. "
+            "Вот пакет, чтобы продолжить:"
+        )
+        await send_pack_invoice(update.effective_chat.id, context)
+        return
 
-    logger.info(
-        f"User {user.id}: {text}"
-    )
-
-    answer = ask_coze(
-        user_id=user.id,
-        message=text
-    )
-
+    logger.info(f"User {user.id}: {text}")
+    answer = ask_coze(user_id=user.id, message=text)
     await send_long_message(update.message, answer)
 
 
-telegram_app.add_handler(
-    CommandHandler(
-        "start",
-        start_command
-    )
-)
-telegram_app.add_handler(
-    MessageHandler(
-        filters.TEXT & ~filters.COMMAND,
-        handle_message
-    )
-)
+telegram_app.add_handler(CommandHandler("start", start_command))
+telegram_app.add_handler(PreCheckoutQueryHandler(precheckout_callback))
+telegram_app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
+telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
 
 @app.on_event("startup")
 async def startup():
     await telegram_app.initialize()
     await telegram_app.start()
-    await telegram_app.updater.start_polling(
-        drop_pending_updates=True
-    )
-    logger.info("Telegram bot started")
+    await telegram_app.updater.start_polling(drop_pending_updates=True)
+    logger.info("Standalone AI bot started")
 
 
 @app.on_event("shutdown")
@@ -151,18 +148,11 @@ async def shutdown():
 @app.post("/webhook")
 async def webhook(request: Request):
     data = await request.json()
-    update = Update.de_json(
-        data,
-        telegram_app.bot
-    )
+    update = Update.de_json(data, telegram_app.bot)
     await telegram_app.process_update(update)
-    return {
-        "ok": True
-    }
+    return {"ok": True}
 
 
 @app.get("/")
 async def home():
-    return {
-        "status": "Helgi AI Bot is running"
-    }
+    return {"status": "Standalone AI bot is running"}
